@@ -1,0 +1,165 @@
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(ggplot2)
+library(sctransform)
+library(uwot)
+library(patchwork)
+library(tidyverse)
+library(EnhancedVolcano)
+library(DESeq2)
+library(RColorBrewer)
+library(pheatmap)
+library(patchwork)
+
+feature.pal = rev(colorRampPalette(brewer.pal(8,"Spectral"))(24))
+
+#load SCT-integrated week 14, week 17  human kidney object
+load("C:/.../kidmerge_NE_UE4.Robj")
+
+DefaultAssay(kidmerge_NE_UE4)  <- "RNA"
+kidmerge_NE_UE4 <- NormalizeData(kidmerge_NE_UE4, verbose = TRUE)
+
+# Rename classes
+kidmerge_NE_UE4 <- RenameIdents(object = kidmerge_NE_UE4,
+                                `0` = 'NPC',
+                                `5` = 'NPC',
+                                `1` = 'NPC',
+                                `6` = 'NPC',
+                                `8` = 'NPC',
+                                `3` = 'NPC',
+                                `4` = 'NPC',
+                                `2` = 'IP',
+                                `10` = 'IP',
+                                `13` = 'IP',
+                                `9` = 'PTA',
+                                `16` = 'pod',
+                                `18` = 'pod',
+                                `12` = 'pod',
+                                `22` = 'PEC',
+                                `15` = 'dist prec',
+                                `21` = 'PT prec',
+                                `24` = 'PT',
+                                `20` = 'PT',
+                                `19` = 'DCT/CNT',
+                                `14` = 'LOH',
+                                `17` = 'UE',
+                                `26` = 'UE')
+
+kidmerge_NE_UE4$celltype <- Idents(kidmerge_NE_UE4)
+
+kidmerge_NE_UE4$sample <- "hukid"
+
+head(kidmerge_NE_UE4@meta.data)
+
+#load merged D14 control and DE organoid object (nephron-only)
+D14_nephmerge <- readRDS("C:/.../D14_nephmerge_unintegrated_regressed_10k_reident.rds")
+
+DefaultAssay(D14_nephmerge) <- "RNA"
+D14_nephmerge <- NormalizeData(D14_nephmerge)
+
+kidmerge_NE_UE4 <- FindVariableFeatures(kidmerge_NE_UE4, nfeatures = 10000)
+D14_nephmerge <- FindVariableFeatures(D14_nephmerge, nfeatures = 10000)
+
+kidmerge_NE_UE4 <- RunUMAP(kidmerge_NE_UE4, reduction = "pca", dims = 1:50, return.model = T)
+D14_nephmerge <- RunUMAP(D14_nephmerge, reduction = "pca", dims = 1:50, return.model = T)
+
+# D14org.conditions is the query dataset, kidmerge_NE_UE4 is the reference dataset
+
+kidmerge_NE_UE4 <- FindNeighbors(
+  object = kidmerge_NE_UE4,
+  reduction = "pca",
+  dims = 1:50,
+  graph.name = "pca.annoy.neighbors", 
+  k.param = 50,
+  cache.index = TRUE,
+  return.neighbor = TRUE,
+  l2.norm = TRUE
+)
+
+D14org.conditions <- SplitObject(D14_nephmerge, split.by = "condition")
+
+D14org.conditions <- lapply(X = D14org.conditions, FUN = NormalizeData, verbose = FALSE)
+
+anchors <- list()
+for (i in 1:length(D14org.conditions)) {
+  anchors[[i]] <- FindTransferAnchors(
+    reference = kidmerge_NE_UE4,
+    query = D14org.conditions[[i]],
+    k.filter = NA,
+    reference.reduction = "pca", 
+    reference.neighbors = "pca.annoy.neighbors", 
+    dims = 1:50
+  )
+}
+
+for (i in 1:length(D14org.conditions)) {
+  D14org.conditions[[i]] <- MapQuery(
+    anchorset = anchors[[i]], 
+    query = D14org.conditions[[i]],
+    reference = kidmerge_NE_UE4, 
+    refdata = list(
+      celltype = "celltype"),
+    reference.reduction = "pca",
+    reduction.model = "umap",
+    new.reduction.name = "ref.pca"
+  )
+}
+
+p1 <- DimPlot(D14org.conditions[[1]], reduction = 'ref.umap', group.by = 'predicted.celltype', label = T, repel = T) + NoLegend()
+p2 <- DimPlot(D14org.conditions[[2]], reduction = 'ref.umap', group.by = 'predicted.celltype', label = T, repel = T)
+p1 + p2 + plot_layout(guides = "collect")
+
+
+# Extract metadata
+metadata1 <- D14org.conditions[[1]]@meta.data
+metadata2 <- D14org.conditions[[2]]@meta.data
+
+predicted_cell_type_scores <- c("NPC","IP","PTA","pod","PEC","dist prec","PT prec","PT","LOH", "DCT/CNT","UE")  # Replace with your actual score column names
+
+# Summarize the data
+cell_counts1 <- metadata1 %>%
+  group_by(predicted.celltype, condition) %>%
+  summarize(count = n(), .groups = 'drop')
+
+# Plot the data
+ggplot(cell_counts1, aes(x = predicted.celltype, y = count, fill = condition)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  theme_minimal() +
+  xlab("Predicted Cell Type") +
+  ylab("Number of Cells") +
+  ggtitle("Number of Cells Represented in Each Predicted Cell Type by Condition") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+FeaturePlot(D14org.conditions[[2]], features = c("rna_WT1"), reduction = 'ref.umap', label = T) & NoAxes()
+
+head(D14org.conditions[[2]]@meta.data)
+
+predicted_cell_type_scores <- c("NPC","IP","PTA","pod","PEC","dist prec","PT prec","PT","LOH", "DCT/CNT","UE")  # Replace with your actual score column names
+
+# Generate summary statistics for each predicted cell type score
+score_summary1 <- metadata1 %>%
+  group_by(predicted.celltype) %>%
+  summarize(
+    mean_score = mean(predicted.celltype.score, na.rm = TRUE),
+    median_score = median(predicted.celltype.score, na.rm = TRUE),
+    sd_score = sd(predicted.celltype.score, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+score_summary2 <- metadata2 %>%
+  group_by(predicted.celltype) %>%
+  summarize(
+    mean_score = mean(predicted.celltype.score, na.rm = TRUE),
+    median_score = median(predicted.celltype.score, na.rm = TRUE),
+    sd_score = sd(predicted.celltype.score, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# View the result
+print(score_summary1)
+print(score_summary2)
+
+# Merge the batches 
+D14_nephmerge <- merge(D14org.conditions[[1]], D14org.conditions[2:length(D14org.conditions)], merge.dr = T)
+DimPlot(D14_nephmerge, reduction = "ref.umap", group.by =  "predicted.celltype", label = TRUE, repel = TRUE, label.size = 3)
